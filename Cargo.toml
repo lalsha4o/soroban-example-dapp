@@ -2,11 +2,8 @@
 resolver = "2"
 
 members = [
-    "contracts/*",
+    "contracts/crowdfund",
 ]
-
-[workspace.package]
-rust-version = "1.74.0"
 
 [profile.release]
 opt-level = "z"
@@ -18,6 +15,7 @@ panic = "abort"
 codegen-units = 1
 lto = true
 
-[workspace.dependencies]
-soroban-sdk = "20.0.0-rc2"
-soroban-token-sdk = "20.0.0-rc2"
+[workspace.dependencies.soroban-sdk]
+version = "0.7.0"
+git = "https://github.com/stellar/rs-soroban-sdk"
+rev = "9b7a8da3c7f9df96c2213c3d687e79cc910e9fd9"

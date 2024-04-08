@@ -1,9 +1,6 @@
 #![no_std]
-use soroban_sdk::{
-    contract, contractimpl, contractmeta, contracttype, token, Address, Env, IntoVal, Val,
-};
+use soroban_sdk::{contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, RawVal};
 
-mod events;
 mod test;
 mod testutils;
 
@@ -16,7 +13,6 @@ pub enum DataKey {
     Target,
     Token,
     User(Address),
-    RecipientClaimed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,8 +23,8 @@ pub enum State {
     Expired = 2,
 }
 
-impl IntoVal<Env, Val> for State {
-    fn into_val(&self, env: &Env) -> Val {
+impl IntoVal<Env, RawVal> for State {
+    fn into_val(&self, env: &Env) -> RawVal {
         (*self as u32).into_val(env)
     }
 }
@@ -39,92 +35,69 @@ fn get_ledger_timestamp(e: &Env) -> u64 {
 
 fn get_recipient(e: &Env) -> Address {
     e.storage()
-        .instance()
-        .get::<_, Address>(&DataKey::Recipient)
+        .get(&DataKey::Recipient)
         .expect("not initialized")
-}
-
-fn get_recipient_claimed(e: &Env) -> bool {
-    e.storage()
-        .instance()
-        .get::<_, bool>(&DataKey::RecipientClaimed)
-        .expect("not initialized")
+        .unwrap()
 }
 
 fn get_deadline(e: &Env) -> u64 {
     e.storage()
-        .instance()
-        .get::<_, u64>(&DataKey::Deadline)
+        .get(&DataKey::Deadline)
         .expect("not initialized")
+        .unwrap()
 }
 
 fn get_started(e: &Env) -> u64 {
     e.storage()
-        .instance()
-        .get::<_, u64>(&DataKey::Started)
+        .get(&DataKey::Started)
         .expect("not initialized")
+        .unwrap()
 }
 
 fn get_target_amount(e: &Env) -> i128 {
     e.storage()
-        .instance()
-        .get::<_, i128>(&DataKey::Target)
+        .get(&DataKey::Target)
         .expect("not initialized")
+        .unwrap()
 }
 
-fn get_token(e: &Env) -> Address {
+fn get_token(e: &Env) -> BytesN<32> {
     e.storage()
-        .instance()
-        .get::<_, Address>(&DataKey::Token)
+        .get(&DataKey::Token)
         .expect("not initialized")
+        .unwrap()
 }
 
 fn get_user_deposited(e: &Env, user: &Address) -> i128 {
     e.storage()
-        .instance()
-        .get::<_, i128>(&DataKey::User(user.clone()))
-        .unwrap_or(0)
+        .get(&DataKey::User(user.clone()))
+        .unwrap_or(Ok(0))
+        .unwrap()
 }
 
-fn get_balance(e: &Env, contract_id: &Address) -> i128 {
+fn get_balance(e: &Env, contract_id: &BytesN<32>) -> i128 {
     let client = token::Client::new(e, contract_id);
     client.balance(&e.current_contract_address())
 }
 
-fn target_reached(e: &Env, token_id: &Address) -> bool {
-    let target_amount = get_target_amount(e);
-    let token_balance = get_balance(e, token_id);
-
-    if token_balance >= target_amount {
-        return true;
-    };
-    false
-}
-
 fn get_state(e: &Env) -> State {
     let deadline = get_deadline(e);
+    let target_amount = get_target_amount(e);
     let token_id = get_token(e);
+    let token_balance = get_balance(e, &token_id);
     let current_timestamp = get_ledger_timestamp(e);
 
     if current_timestamp < deadline {
         return State::Running;
     };
-    if get_recipient_claimed(e) || target_reached(e, &token_id) {
+    if token_balance >= target_amount {
         return State::Success;
     };
     State::Expired
 }
 
 fn set_user_deposited(e: &Env, user: &Address, amount: &i128) {
-    e.storage()
-        .instance()
-        .set(&DataKey::User(user.clone()), amount);
-}
-
-fn set_recipient_claimed(e: &Env) {
-    e.storage()
-        .instance()
-        .set(&DataKey::RecipientClaimed, &true);
+    e.storage().set(&DataKey::User(user.clone()), amount);
 }
 
 // Transfer tokens from the contract to the recipient
@@ -134,13 +107,6 @@ fn transfer(e: &Env, to: &Address, amount: &i128) {
     client.transfer(&e.current_contract_address(), to, amount);
 }
 
-// Metadata that is added on to the WASM custom section
-contractmeta!(
-    key = "Description",
-    val = "Crowdfunding contract that allows users to deposit tokens and withdraw them if the target is not met"
-);
-
-#[contract]
 struct Crowdfund;
 
 /*
@@ -159,23 +125,16 @@ impl Crowdfund {
         recipient: Address,
         deadline: u64,
         target_amount: i128,
-        token: Address,
+        token: BytesN<32>,
     ) {
-        assert!(
-            !e.storage().instance().has(&DataKey::Recipient),
-            "already initialized"
-        );
+        assert!(!e.storage().has(&DataKey::Recipient), "already initialized");
 
-        e.storage().instance().set(&DataKey::Recipient, &recipient);
+        e.storage().set(&DataKey::Recipient, &recipient);
         e.storage()
-            .instance()
-            .set(&DataKey::RecipientClaimed, &false);
-        e.storage()
-            .instance()
             .set(&DataKey::Started, &get_ledger_timestamp(&e));
-        e.storage().instance().set(&DataKey::Deadline, &deadline);
-        e.storage().instance().set(&DataKey::Target, &target_amount);
-        e.storage().instance().set(&DataKey::Token, &token);
+        e.storage().set(&DataKey::Deadline, &deadline);
+        e.storage().set(&DataKey::Target, &target_amount);
+        e.storage().set(&DataKey::Token, &token);
     }
 
     pub fn recipient(e: Env) -> Address {
@@ -198,7 +157,7 @@ impl Crowdfund {
         get_target_amount(&e)
     }
 
-    pub fn token(e: Env) -> Address {
+    pub fn token(e: Env) -> BytesN<32> {
         get_token(&e)
     }
 
@@ -218,8 +177,6 @@ impl Crowdfund {
         user.require_auth();
         assert!(amount > 0, "amount must be positive");
         assert!(get_state(&e) == State::Running, "sale is not running");
-        let token_id = get_token(&e);
-        let current_target_met = target_reached(&e, &token_id);
 
         let recipient = get_recipient(&e);
         assert!(user != recipient, "recipient may not deposit");
@@ -227,17 +184,8 @@ impl Crowdfund {
         let balance = get_user_deposited(&e, &user);
         set_user_deposited(&e, &user, &(balance + amount));
 
-        let client = token::Client::new(&e, &token_id);
+        let client = token::Client::new(&e, &get_token(&e));
         client.transfer(&user, &e.current_contract_address(), &amount);
-
-        let contract_balance = get_balance(&e, &token_id);
-
-        // emit events
-        events::pledged_amount_changed(&e, contract_balance);
-        if !current_target_met && target_reached(&e, &token_id) {
-            // only emit the target reached event once on the pledge that triggers target to be met
-            events::target_reached(&e, contract_balance, get_target_amount(&e));
-        }
     }
 
     pub fn withdraw(e: Env, to: Address) {
@@ -253,14 +201,8 @@ impl Crowdfund {
                     to == recipient,
                     "sale was successful, only the recipient may withdraw"
                 );
-                assert!(
-                    !get_recipient_claimed(&e),
-                    "sale was successful, recipient has withdrawn funds already"
-                );
-
                 let token = get_token(&e);
                 transfer(&e, &recipient, &get_balance(&e, &token));
-                set_recipient_claimed(&e);
             }
             State::Expired => {
                 assert!(
@@ -272,11 +214,6 @@ impl Crowdfund {
                 let balance = get_user_deposited(&e, &to);
                 set_user_deposited(&e, &to, &0);
                 transfer(&e, &to, &balance);
-
-                // emit events
-                let token_id = get_token(&e);
-                let contract_balance = get_balance(&e, &token_id);
-                events::pledged_amount_changed(&e, contract_balance);
             }
         };
     }
